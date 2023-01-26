@@ -2,7 +2,7 @@ import grid
 import nengo
 import nengo.spa as spa
 import numpy as np 
-
+import detectors as det
 
 #we can change the map here using # for walls and RGBMY for various colours
 mymap="""
@@ -14,10 +14,9 @@ mymap="""
 #######
 """
 
-
 #### Preliminaries - this sets up the agent and the environment ################ 
-class Cell(grid.Cell):
 
+class Cell(grid.Cell):
     def color(self):
         if self.wall:
             return 'black'
@@ -31,14 +30,12 @@ class Cell(grid.Cell):
             return 'magenta'
         elif self.cellcolor == 5:
             return 'yellow'
-             
         return None
 
     def load(self, char):
         self.cellcolor = 0
         if char == '#':
             self.wall = True
-            
         if char == 'G':
             self.cellcolor = 1
         elif char == 'R':
@@ -49,13 +46,10 @@ class Cell(grid.Cell):
             self.cellcolor = 4
         elif char == 'Y':
             self.cellcolor = 5
-            
-            
-world = grid.World(Cell, map=mymap, directions=int(4))
 
+world = grid.World(Cell, map=mymap, directions=int(4))
 body = grid.ContinuousAgent()
 world.add(body, x=1, y=2, dir=2)
-
 #this defines the RGB values of the colours. We use this to translate the "letter" in 
 #the map to an actual colour. Note that we could make some or all channels noisy if we
 #wanted to
@@ -68,15 +62,21 @@ col_values = {
     5: [0.8, 0.8, 0.2], # Yellow
 }
 
-noise_val = 0.1 # how much noise there will be in the colour info
+KEYS = ['RED', 'GREEN', 'BLUE', 'YELLOW', 'MAGENTA', 'WHITE']
+VALUES = [[0.8, 0.2, 0.2], [0.2, 0.8, 0.2],  [0.2, 0.2, 0.8], [0.8, 0.8, 0.2], [0.8, 0.2, 0.8], [0.9, 0.9, 0.9]]
+
+D = 32
+
+vocab_binary = spa.Vocabulary(D)
+vocab_color = spa.Vocabulary(D)
+noise_val = 0 # how much noise there will be in the colour info
 
 #You do not have to use spa.SPA; you can also do this entirely with nengo.Network()
 model = spa.SPA()
 with model:
-    
     # create a node to connect to the world we have created (so we can see it)
     env = grid.GridNode(world, dt=0.005)
-
+    
     ### Input and output nodes - how the agent sees and acts in the world ######
 
     #--------------------------------------------------------------------------#
@@ -84,87 +84,340 @@ with model:
     # It has two values that define the speed and the rotation of the agent    #
     #--------------------------------------------------------------------------#
     def move(t, x):
+
         speed, rotation = x
         dt = 0.001
         max_speed = 20.0
         max_rotate = 10.0
         body.turn(rotation * dt * max_rotate)
         body.go_forward(speed * dt * max_speed)
-        
+
     movement = nengo.Node(move, size_in=2)
-    
+
     #--------------------------------------------------------------------------#
     # First input node and its function: 3 proximity sensors to detect walls   #
     # up to some maximum distance ahead                                        #
     #--------------------------------------------------------------------------#
+    
     def detect(t):
         angles = (np.linspace(-0.5, 0.5, 3) + body.dir) % world.directions
         return [body.detect(d, max_distance=4)[0] for d in angles]
+        
     proximity_sensors = nengo.Node(detect)
 
     #--------------------------------------------------------------------------#
     # Second input node and its function: the colour of the current cell of    #
     # agent                                                                    #
     #--------------------------------------------------------------------------#
+    
     def cell2rgb(t):
-        
         c = col_values.get(body.cell.cellcolor)
         noise = np.random.normal(0, noise_val,3)
         c = np.clip(c + noise, 0, 1)
-        
         return c
-        
+
     current_color = nengo.Node(cell2rgb)
-     
+
     #--------------------------------------------------------------------------#
     # Final input node and its function: the colour of the next non-whilte     #
     # cell (if any) ahead of the agent. We cannot see through walls.           #
     #--------------------------------------------------------------------------#
+    
     def look_ahead(t):
-        
         done = False
-        
         cell = body.cell.neighbour[int(body.dir)]
         if cell.cellcolor > 0:
+
             done = True 
+
             
+
         while cell.neighbour[int(body.dir)].wall == False and not done:
+
             cell = cell.neighbour[int(body.dir)]
+
             
+
             if cell.cellcolor > 0:
+
                 done = True
+
         
+
         c = col_values.get(cell.cellcolor)
+
         noise = np.random.normal(0, noise_val,3)
+
         c = np.clip(c + noise, 0, 1)
+
         
+
         return c
+
+
+
+    def color_detector(x):
+
+        empty = [0,0,0,0,0,0]
+
+        for i, x_i in enumerate(VALUES):
+
+            if (x_i == x).all():
+
+                empty[i] = 1
+
+        return empty
+
         
+
+        
+
     ahead_color = nengo.Node(look_ahead)    
+
+
+
+    #Detect current color, and keep in memory:
+
+    model.red_switch = spa.State(D, vocab=vocab_binary)
+
+    model.green_switch = spa.State(D, vocab=vocab_binary)
+
+    model.blue_switch = spa.State(D, vocab=vocab_binary)
+
+    model.yellow_switch = spa.State(D, vocab=vocab_binary)
+
+    model.magenta_switch = spa.State(D, vocab=vocab_binary)
+
+    current_color_detector_node = nengo.Node(size_in=6)
+
+
+
+
+
+    nengo.Connection(current_color, current_color_detector_node, function=color_detector)
+
     
+
     ### Agent functionality - your code adds to this section ###################
+
     
+
+    vocab_binary.parse("TRUE+FALSE")
+
+    vocab_color.parse("RED+GREEN+BLUE+YELLOW+MAGENTA+WHITE")
+
+    deriv_color = nengo.Ensemble(n_neurons= 1000, dimensions = 6, radius=3)
+
+    deriv_color2 = nengo.Ensemble(n_neurons= 1000, dimensions = 6, radius=3)
+
+    nengo.Connection(current_color_detector_node, deriv_color)
+
+    nengo.Connection(current_color_detector_node, deriv_color, transform=-1, synapse=0.05)
+
+    nengo.Connection(deriv_color, deriv_color2, function= lambda x: x*5)
+
+    
+
+    nengo.Connection(deriv_color2[0], model.red_switch.input, transform=5*vocab_binary["TRUE"].v.reshape(D, 1))
+
+    nengo.Connection(deriv_color2[1], model.green_switch.input, transform=5*vocab_binary["TRUE"].v.reshape(D, 1))
+
+    nengo.Connection(deriv_color2[2], model.blue_switch.input, transform=5*vocab_binary["TRUE"].v.reshape(D, 1))
+
+    nengo.Connection(deriv_color2[3], model.yellow_switch.input, transform=5*vocab_binary["TRUE"].v.reshape(D, 1))
+
+    nengo.Connection(deriv_color2[4], model.magenta_switch.input, transform=5*vocab_binary["TRUE"].v.reshape(D, 1))
+
+    
+
+    
+
+    model.memory_red = spa.State(D, vocab=vocab_binary)
+
+    model.cleanupred = spa.AssociativeMemory(input_vocab=vocab_binary, wta_output=True)
+
+    nengo.Connection(model.cleanupred.output, model.memory_red.input, synapse=0.01)
+
+    nengo.Connection(model.memory_red.output, model.cleanupred.input, synapse=0.01)
+
+    
+
+    model.memory_green = spa.State(D, vocab=vocab_binary)
+
+    model.cleanupgreen = spa.AssociativeMemory(input_vocab=vocab_binary, wta_output=True)
+
+    nengo.Connection(model.cleanupgreen.output, model.memory_green.input, synapse=0.01)
+
+    nengo.Connection(model.memory_green.output, model.cleanupgreen.input, synapse=0.01)
+
+    
+
+    model.memory_blue = spa.State(D, vocab=vocab_binary)
+
+    model.cleanupblue = spa.AssociativeMemory(input_vocab=vocab_binary, wta_output=True)
+
+    nengo.Connection(model.cleanupblue.output, model.memory_blue.input, synapse=0.01)
+
+    nengo.Connection(model.memory_blue.output, model.cleanupblue.input, synapse=0.01)
+
+    
+
+    model.memory_yellow = spa.State(D, vocab=vocab_binary)
+
+    model.cleanupyellow = spa.AssociativeMemory(input_vocab=vocab_binary, wta_output=True)
+
+    nengo.Connection(model.cleanupyellow.output, model.memory_yellow.input, synapse=0.01)
+
+    nengo.Connection(model.memory_yellow.output, model.cleanupyellow.input, synapse=0.01)
+
+    
+
+    model.memory_magenta = spa.State(D, vocab=vocab_binary)
+
+    model.cleanupmagenta = spa.AssociativeMemory(input_vocab=vocab_binary, wta_output=True)
+
+    nengo.Connection(model.cleanupmagenta.output, model.memory_magenta.input, synapse=0.01)
+
+    nengo.Connection(model.memory_magenta.output, model.cleanupmagenta.input, synapse=0.01)
+
+    
+
+    
+
+    #Detect color ahead:
+
+    ahead_color_detector_node = nengo.Node(size_in=6)
+
+    
+
+    nengo.Connection(ahead_color, ahead_color_detector_node, function=color_detector)
+
+    
+
+    model.red_ahead_switch = spa.State(D, vocab=vocab_binary)
+
+    model.green_ahead_switch = spa.State(D, vocab=vocab_binary)
+
+    model.blue_ahead_switch = spa.State(D, vocab=vocab_binary)
+
+    model.yellow_ahead_switch = spa.State(D, vocab=vocab_binary)
+
+    model.magenta_ahead_switch = spa.State(D, vocab=vocab_binary)
+
+        
+
+    deriv_color_ahead = nengo.Ensemble(n_neurons= 1000, dimensions = 6, radius=3)
+
+    deriv_color2_ahead = nengo.Ensemble(n_neurons= 1000, dimensions = 6, radius=3)
+
+    
+
+    nengo.Connection(ahead_color_detector_node, deriv_color_ahead)
+
+    nengo.Connection(ahead_color_detector_node, deriv_color_ahead, transform=-1, synapse=0.05)
+
+    nengo.Connection(deriv_color_ahead, deriv_color2_ahead, function= lambda x: x*5)
+
+    
+
+    nengo.Connection(deriv_color2_ahead[0], model.red_ahead_switch.input, transform=5*vocab_binary["TRUE"].v.reshape(D, 1))
+
+    nengo.Connection(deriv_color2_ahead[1], model.green_ahead_switch.input, transform=5*vocab_binary["TRUE"].v.reshape(D, 1))
+
+    nengo.Connection(deriv_color2_ahead[2], model.blue_ahead_switch.input, transform=5*vocab_binary["TRUE"].v.reshape(D, 1))
+
+    nengo.Connection(deriv_color2_ahead[3], model.yellow_ahead_switch.input, transform=5*vocab_binary["TRUE"].v.reshape(D, 1))
+
+    nengo.Connection(deriv_color2_ahead[4], model.magenta_ahead_switch.input, transform=5*vocab_binary["TRUE"].v.reshape(D, 1))
+
     #All input nodes should feed into one ensemble. Here is how to do this for
+
     #the radar, see if you can do it for the others
+
     walldist = nengo.Ensemble(n_neurons=500, dimensions=3, radius=4)
+
     nengo.Connection(proximity_sensors, walldist)
 
+
+
     #For now, all our agent does is wall avoidance. It uses values of the radar
+
     #to: a) turn away from walls on the sides and b) slow down in function of 
+
     #the distance to the wall ahead, reversing if it is really close
+
     def movement_func(x):
-        turn = x[2] - x[0]
-        spd = x[1] - 0.5
+
+        turn = (x[2] - x[0]) 
+
+        spd = (x[1] - 0.5) / 5
+
         return spd, turn
+
+        
+
+    actions = spa.Actions(
+
+        'dot(red_switch, TRUE) --> memory_red=TRUE',
+
+        'dot(green_switch, TRUE) --> memory_green=TRUE',
+
+        'dot(blue_switch, TRUE) --> memory_blue=TRUE',
+
+        'dot(yellow_switch, TRUE) --> memory_yellow=TRUE',
+
+        'dot(magenta_switch, TRUE) --> memory_magenta=TRUE',
+
+        '0.7 --> '
+
+        )
+
+    model.bg = spa.BasalGanglia(actions)
+
+    model.thalamus = spa.Thalamus(model.bg)
+
     
+
+    model.memory_color_ahead = spa.State(D, vocab=vocab_color)
+
+    model.cleanup_color_ahead = spa.AssociativeMemory(input_vocab=vocab_color, wta_output=True)
+
+    nengo.Connection(model.cleanup_color_ahead.output, model.memory_color_ahead.input, synapse=0.01)
+
+    nengo.Connection(model.memory_color_ahead.output, model.cleanup_color_ahead.input, synapse=0.01)
+
+    
+
+    actions_ahead = spa.Actions(
+
+        'dot(red_ahead_switch, TRUE) --> memory_color_ahead=RED-GREEN-BLUE-YELLOW-MAGENTA-WHITE',
+
+        'dot(green_ahead_switch, TRUE) --> memory_color_ahead=GREEN-RED-BLUE-YELLOW-MAGENTA-WHITE',
+
+        'dot(blue_ahead_switch, TRUE) --> memory_color_ahead=BLUE-GREEN-RED-YELLOW-MAGENTA-WHITE',
+
+        'dot(yellow_ahead_switch, TRUE) --> memory_color_ahead=YELLOW-GREEN-BLUE-RED-MAGENTA-WHITE',
+
+        'dot(magenta_ahead_switch, TRUE) --> memory_color_ahead=MAGENTA-GREEN-BLUE-RED-YELLOW-WHITE',
+
+        '0.7 --> memory_color_ahead=0.5*WHITE-GREEN-BLUE-RED-YELLOW-MAGENTA'
+
+        )
+
+
+
+    model.bg_ahead = spa.BasalGanglia(actions_ahead)
+
+    model.thalamus_ahead = spa.Thalamus(model.bg_ahead)
+
+    
+
     #the movement function is only driven by information from the radar, so we
+
     #can connect the radar ensemble to the output node with this function 
+
     #directly. In the assignment, you will need intermediate steps
+
     nengo.Connection(walldist, movement, function=movement_func)  
 
-
-
-    
-    
-    
  
